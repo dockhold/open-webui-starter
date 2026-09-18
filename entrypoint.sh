@@ -137,7 +137,7 @@ if [ -z "${WEBUI_SECRET_KEY:-}" ]; then
     [ "$(wc -l < "$KEY_FILE" | tr -d ' ')" -le 1 ] || key_damaged
     head -n 1 "$KEY_FILE" | grep -Eqx '[A-Za-z0-9+/]{32,}={0,2}' || key_damaged
   elif [ -e "$DH/template" ]; then
-    echo "The app's session key is missing from App storage. Restore it from your backup or bind WEBUI_SECRET_KEY to the previous value." >&2
+    echo "The app's session key is missing from App storage. Restore it from your backup if the app ever had one, or bind WEBUI_SECRET_KEY to the previous value." >&2
     exit 1
   else
     # First start: create the key the way upstream would, but atomically,
@@ -188,27 +188,49 @@ export ENABLE_SIGNUP="${ENABLE_SIGNUP:-false}"
 
 cd /app/backend
 
-# 7. First start only: prove the admin account before opening the port.
+# 7. Prove the admin account before opening the port.
 #
 # Open WebUI creates the admin from the variables during its startup and,
 # if that fails, keeps going with no accounts at all; and while no account
 # exists, its signup endpoint accepts the first caller as admin whatever
 # the signup setting says. The value checks in step 3 stop every failure
-# this script can see coming; this step stops the ones it cannot. On a
-# storage folder without the established-install marker, upstream is
-# started on the loopback address and an internal port (unreachable from
-# outside), the admin signs in there, and only then is the marker written
-# and the real server started on Dockhold's port. Nothing listens on that
-# port until the account is proven. A refusal here writes no marker, so
-# the next start repeats this step; upstream creates the admin only while
-# no users exist, which is the state a failed first start leaves behind.
-# An established installation skips this step, so the extra start (half a
+# this script can see coming; this step stops the ones it cannot. It runs
+# whenever the installation cannot be shown to have an account already:
+# no established-install marker, no database file, or a database whose
+# user table is empty or cannot be read (a restore, a damaged file, a
+# database emptied by hand). Then upstream is started on the loopback
+# address and an internal port (unreachable from outside), the admin signs
+# in there, and only then is the marker written and the real server
+# started on Dockhold's port. Nothing listens on that port until the
+# account is proven. A refusal here writes no marker, so the next start
+# repeats this step; upstream creates the admin only while no users exist,
+# which is the state a failed first start leaves behind. An established
+# installation with an account skips this step, so the extra start (half a
 # minute or more) is paid once per installation.
 #
 # A kill during this step leaves no marker and, at most, an admin account
 # that the next pass finds by signing in. The stop signal is forwarded to
 # the inner server so it closes its database cleanly.
-if [ ! -e "$DH/template" ]; then
+need_verify=""
+if [ ! -e "$DH/template" ] || [ ! -f "$DATA_DIR/webui.db" ]; then
+  need_verify=yes
+else
+  # A count that is not a positive number, for whatever reason, means the
+  # pass runs. The query never writes.
+  count_users() {
+    DB_PATH="$DATA_DIR/webui.db" python3 - 2>/dev/null <<'PY'
+import os, sqlite3
+db = sqlite3.connect(os.environ["DB_PATH"])
+print(db.execute('SELECT count(*) FROM "user"').fetchone()[0])
+PY
+  }
+  users=$(count_users || echo "")
+  case "$users" in
+    ''|*[!0-9]*) need_verify=yes ;;
+    *) [ "$users" -gt 0 ] || need_verify=yes ;;
+  esac
+fi
+if [ -n "$need_verify" ]; then
   echo "Verifying the admin account before opening the port"
   VERIFY_PORT=8079
   [ "${PORT:-8080}" != "$VERIFY_PORT" ] || VERIFY_PORT=8078
@@ -263,7 +285,7 @@ PY
     verify_stop
   else
     verify_stop
-    echo "The admin account could not be created. Check WEBUI_ADMIN_EMAIL and WEBUI_ADMIN_PASSWORD on this app's Variables tab and restart." >&2
+    echo "The admin account could not be created, or the bound WEBUI_ADMIN_EMAIL and WEBUI_ADMIN_PASSWORD do not match the existing admin. Check them on this app's Variables tab and restart." >&2
     exit 1
   fi
 
@@ -272,8 +294,9 @@ PY
   # Written only now: every check passed, the session key exists, and the
   # admin account has signed in. Its presence means "an existing
   # installation": from now on a missing key file is an error (step 5),
-  # never a silent new key, and step 7 is skipped. Nothing in this script
-  # ever wipes or re-seeds a folder, with or without the marker.
+  # never a silent new key, and step 7 is skipped while the database has
+  # an account. Nothing in this script ever wipes or re-seeds a folder,
+  # with or without the marker.
   printf 'open-webui-starter %s\n' "$TEMPLATE_VERSION" > "$DH/template"
 fi
 

@@ -118,6 +118,12 @@ that, which this template does not run. If a device with an open session is
 lost, change the password (Settings > Account); the old session ends within
 seven days. A **Restart** does not sign anyone out.
 
+Keep the admin password somewhere safe, or create a second admin in
+Admin > Users. `WEBUI_ADMIN_PASSWORD` is read only on the first start,
+Open WebUI has no self-service reset without an email provider, and there
+is no shell into the app: a lost password on an installation with a single
+admin means a fresh installation.
+
 ## Session key
 
 Open WebUI signs every login with one secret key. The start script keeps
@@ -132,9 +138,12 @@ setting. Binding it, changing it, or unbinding it signs every user out, and
 any tokens stored for single sign-on under the other key become unreadable.
 Use it to recover from a lost file: bind the value from your backup, or, if
 you have no backup, bind any new value and accept that everyone signs in
-again.
+again. An installation that started with the key bound has no key file at
+all: unbind it and the app refuses to start until you bind a key again, and
+any new value signs everyone out.
 
-The key file is part of your backup set.
+The key file, where one exists, is part of your backup set; a bound key is
+one of the secrets in it.
 
 ## Backups, upgrading, restoring
 
@@ -145,6 +154,10 @@ database file (users, chats, settings); uploaded documents, the search
 index and the key file live only on App storage, so the storage contents
 are the complete set. App storage is not a backup of itself: take one
 before you upgrade and on a schedule.
+
+The database file holds your provider key, and any single sign-on client
+secrets you add later, in plain text. The file and its export are secrets
+in their own right: store them the way you store the key itself.
 
 **Upgrading.** Take a backup first. Upgrades happen on the Develop path:
 in your copy, change the tag and the digest on the `FROM` line of the

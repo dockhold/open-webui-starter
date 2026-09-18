@@ -1,12 +1,21 @@
 name: Check
-on: [push, pull_request]
+# The smoke test takes a quarter of an hour. Run it once per change: pushes
+# to main and pull requests, and a newer run of the same ref cancels an
+# older one.
+on:
+  push:
+    branches: [main]
+  pull_request:
 permissions:
   contents: read
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Pinned version, tag and digest agree
         # The Dockerfile pins a tag and a digest; the start script writes the
         # same version into the install marker. All three must say the same

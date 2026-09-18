@@ -13,7 +13,7 @@
 # container log after a failure. A full run starts the app about ten times
 # and each cold start takes half a minute or more (a first start on fresh
 # storage takes two: the admin is verified on loopback before the port
-# opens), so expect fifteen minutes.
+# opens), so expect twenty minutes.
 set -euo pipefail
 
 IMAGE=${1:?usage: tests/smoke.sh <image>}
@@ -30,12 +30,12 @@ BASE=$(mktemp -d "${TMPDIR:-/tmp}/owuismoke.XXXXXX")
 STORAGE_LINE="This app keeps its data on App storage. Turn on App storage in the Size tab; the app restarts on its own."
 DB_LINE="This template keeps Open WebUI's data on App storage and does not use the managed database yet. Turn the managed database off for this app and restart it."
 VERIFY_LINE="Verifying the admin account before opening the port"
-NO_ADMIN_LINE="The admin account could not be created. Check WEBUI_ADMIN_EMAIL and WEBUI_ADMIN_PASSWORD on this app's Variables tab and restart."
+NO_ADMIN_LINE="The admin account could not be created, or the bound WEBUI_ADMIN_EMAIL and WEBUI_ADMIN_PASSWORD do not match the existing admin. Check them on this app's Variables tab and restart."
 STOPPED_LINE="Open WebUI stopped during the first start before the admin account could be verified. The lines above say why."
-KEY_MISSING_LINE="The app's session key is missing from App storage. Restore it from your backup or bind WEBUI_SECRET_KEY to the previous value."
+KEY_MISSING_LINE="The app's session key is missing from App storage. Restore it from your backup if the app ever had one, or bind WEBUI_SECRET_KEY to the previous value."
 KEY_DAMAGED_LINE="The app's session key file on App storage is damaged. Bind WEBUI_SECRET_KEY to the previous key or restore the file from your backup; the file is never overwritten."
 BOOTSTRAP_LINE="Admin account created successfully"
-PDF_TEXT="Dockhold ingestion probe: zebra quantum pineapple harbor."
+PDF_TEXT="Dockhold ingestion probe: zebra quantum pineapple lantern."
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -183,6 +183,22 @@ token_works() { # TOKEN -> status of a protected listing
 }
 
 listener_opened() { app_logs | grep -q 'Started server process\|Uvicorn running'; }
+
+# log_clean NAME VALUE...: after a start, the log must not contain any
+# bound or generated value. Called after every start with every value in
+# play at that point: both admin passwords, both provider keys, the
+# over-long password, the session key file's content and the bound
+# WEBUI_SECRET_KEY value.
+log_clean() {
+  local name=$1 ok=true v log
+  shift
+  log=$(app_logs)
+  for v in "$@"; do
+    [ -n "$v" ] || continue
+    if printf '%s' "$log" | grep -qF -- "$v"; then ok=false; echo "  log contains a bound value"; fi
+  done
+  report "$name: no bound or generated value in the log" $ok
+}
 verify_lines() { app_logs | grep -cF "$VERIFY_LINE" || true; }
 marker_exists() { docker exec "$APP" test -e /data/.dockhold/template 2>/dev/null; }
 
@@ -274,7 +290,11 @@ PASS_1="pw1-$(rand_hex 8)"
 PASS_2="pw2-$(rand_hex 8)"
 KEY_1="sk-key1-$(rand_hex 12)"
 KEY_2="sk-key2-$(rand_hex 12)"
+LONG_PW="L$(rand_hex 36)"   # 73 bytes: passes a naive check, bcrypt upstream refuses it
 SECRETS_A=(-e "WEBUI_ADMIN_EMAIL=$EMAIL_A" -e "WEBUI_ADMIN_PASSWORD=$PASS_1" -e "OPENAI_API_KEY=$KEY_1")
+# Every value that must never appear in a log; the session key is added
+# once the first start has generated it.
+ALL_VALUES=("$PASS_1" "$PASS_2" "$KEY_1" "$KEY_2" "$LONG_PW")
 APP_URL="https://open-webui-$(rand_hex 3).dockhold.app"
 ADDR=(-e "DOCKHOLD_APP_URL=$APP_URL" -e "DOCKHOLD_APP_HOSTNAME=${APP_URL#https://}")
 
@@ -291,7 +311,7 @@ expect_one_line_refusal "DATA_DIR read-only mount: one line, exit 1" "$STORAGE_L
 echo "==== Refused variable"
 D_SEC=$(new_datadir)
 expect_one_line_refusal "DATABASE_URL set: refused with one line, exit 1" "$DB_LINE" \
-  -e DATA_DIR=/data -v "$D_SEC:/data" -e "DATABASE_URL=postgres://user:pw@db.internal:5432/app" "${SECRETS_A[@]}"
+  -e DATA_DIR=/data -v "$D_SEC:/data" -e "DATABASE_URL=postgres://user:pw@db.example:5432/app" "${SECRETS_A[@]}"
 
 # ---------------------------------------------------------------------------
 echo "==== Secret refusals"
@@ -304,9 +324,9 @@ secret_refusal() { # NAME MUST_CONTAIN MUST_NOT_CONTAIN [docker run args...]
   log=$(app_logs)
   [ "$code" = 1 ] || { ok=false; echo "  exit code: $code (want 1)"; }
   [ "$(printf '%s\n' "$log" | wc -l | tr -d ' ')" = 1 ] || { ok=false; echo "  more than one log line"; }
-  printf '%s' "$log" | grep -qF "$must" || { ok=false; echo "  log does not say: $must"; }
+  printf '%s' "$log" | grep -qF -- "$must" || { ok=false; echo "  log does not say: $must"; }
   printf '%s' "$log" | grep -q 'Variables tab\|Settings > Secrets' || { ok=false; echo "  log does not say where to fix it"; }
-  if [ -n "$mustnot" ] && printf '%s' "$log" | grep -qF "$mustnot"; then ok=false; echo "  log contains a secret value"; fi
+  if [ -n "$mustnot" ] && printf '%s' "$log" | grep -qF -- "$mustnot"; then ok=false; echo "  log contains a secret value"; fi
   if listener_opened; then ok=false; echo "  listener opened"; fi
   [ "$(as_root "$D_SEC" 'test -e /data/.dockhold && echo yes || echo no')" = no ] || { ok=false; echo "  a refused start wrote the template folder"; }
   report "$name" $ok
@@ -324,7 +344,6 @@ secret_refusal "admin email without @: refused, exit 1, no value, no listener" "
   -e "WEBUI_ADMIN_EMAIL=owner.example.com" -e "WEBUI_ADMIN_PASSWORD=$PASS_1" -e "OPENAI_API_KEY=$KEY_1"
 secret_refusal "7-character password: refused, exit 1, no value, no listener" "WEBUI_ADMIN_PASSWORD must be 8 to 72" "q7zK2m9" \
   -e "WEBUI_ADMIN_EMAIL=$EMAIL_A" -e "WEBUI_ADMIN_PASSWORD=q7zK2m9" -e "OPENAI_API_KEY=$KEY_1"
-LONG_PW="L$(rand_hex 36)"   # 73 bytes: passes a naive check, bcrypt upstream refuses it
 secret_refusal "73-byte password (upstream's bcrypt would reject it): refused, exit 1, no value, no listener" "WEBUI_ADMIN_PASSWORD must be 8 to 72" "$LONG_PW" \
   -e "WEBUI_ADMIN_EMAIL=$EMAIL_A" -e "WEBUI_ADMIN_PASSWORD=$LONG_PW" -e "OPENAI_API_KEY=$KEY_1"
 
@@ -380,12 +399,9 @@ printf '%s' "$KEY_CONTENT" | grep -Eqx '[A-Za-z0-9+/]{32,}={0,2}' || { ok=false;
 [ "$(as_root "$D_MAIN" 'test -e /data/.webui_secret_key && echo yes || echo no')" = no ] || { ok=false; echo "  upstream wrote its own key file next to the data"; }
 report "first start: session key file (600, 32+ base64 chars), template marker, home dir, all under .dockhold (700)" $ok
 
-ok=true
-if app_logs | grep -qF "$PASS_1"; then ok=false; echo "  log echoes the admin password"; fi
-if app_logs | grep -qF "$KEY_1"; then ok=false; echo "  log echoes the provider key"; fi
-if app_logs | grep -qF "$KEY_CONTENT"; then ok=false; echo "  log echoes the session key"; fi
-report "first start: log never contains the password, the provider key or the session key" $ok
-info "upstream logs the admin email itself: $(app_logs | grep -c "$EMAIL_A") line(s) mention it"
+ALL_VALUES+=("$KEY_CONTENT")
+log_clean "first start" "${ALL_VALUES[@]}"
+info "upstream logs the admin email itself: $(app_logs | grep -cF -- "$EMAIL_A") line(s) mention it"
 
 ok=true
 http GET /api/models "" "$TOK_A1"
@@ -421,7 +437,7 @@ for i in $(seq 1 60); do
   sleep 1
 done
 [ "$STATUS" = completed ] || { ok=false; echo "  file status: $STATUS"; }
-printf '%s' "$HTTP_BODY" | jq -r '.data.content // ""' | grep -qF "zebra quantum pineapple" || { ok=false; echo "  extracted text does not contain the probe sentence"; }
+printf '%s' "$HTTP_BODY" | jq -r '.data.content // ""' | grep -qF -- "zebra quantum pineapple" || { ok=false; echo "  extracted text does not contain the probe sentence"; }
 app_logs | grep -qi 'embeddings generated' || { ok=false; echo "  no embedding step in the log"; }
 if app_logs | grep -qi 'huggingface.co\|Downloading'; then ok=false; echo "  a download was attempted"; fi
 report "first start: one-page PDF upload offline is extracted and embedded with the bundled model, no download attempted" $ok
@@ -455,6 +471,7 @@ SC=$(signup_code "stranger-$(rand_hex 3)@example.com")
 report "second start: signup still refused ($SC)" "$([[ "$SC" =~ ^4 ]] && [ "$(signup_open)" = false ] && echo true || echo false)"
 [ "$(as_root "$D_MAIN" 'cat /data/.dockhold/webui-secret-key')" = "$KEY_CONTENT" ] && k=true || k=false
 report "second start: key file unchanged" $k
+log_clean "second start" "${ALL_VALUES[@]}"
 
 # ---------------------------------------------------------------------------
 echo "==== Settings after the first start: which side wins"
@@ -485,6 +502,7 @@ report "changed ENABLE_OLLAMA_API, ENABLE_SIGNUP, WEBUI_URL, JWT_EXPIRES_IN, DEF
   "$([ "$OLL" = false ] && [ "$ADM" = "{\"ENABLE_SIGNUP\":false,\"WEBUI_URL\":\"$APP_URL\",\"JWT_EXPIRES_IN\":\"7d\",\"DEFAULT_USER_ROLE\":\"pending\"}" ] && echo true || echo false)"
 SC=$(signup_code "stranger-$(rand_hex 3)@example.com")
 report "ENABLE_SIGNUP=true on restart: signup still refused ($SC)" "$([[ "$SC" =~ ^4 ]] && echo true || echo false)"
+log_clean "settings-changed start" "${ALL_VALUES[@]}"
 
 # ---------------------------------------------------------------------------
 echo "==== Forged proxy headers"
@@ -498,7 +516,15 @@ http POST /api/v1/auths/signup '{"email":"forged@example.com","password":"forged
 [[ "$HTTP_CODE" =~ ^4 ]] || { ok=false; echo "  signup with forged headers returned $HTTP_CODE"; }
 http GET /openai/config "" "" "${FORGED[@]}"
 [[ "$HTTP_CODE" =~ ^4 ]] || { ok=false; echo "  provider config with forged headers returned $HTTP_CODE"; }
-report "forged X-Forwarded-* and Host headers confer nothing" $ok
+report "forged X-Forwarded-* and Host headers: protected endpoints still refuse without a token" $ok
+# What the headers do change: upstream starts uvicorn with
+# --forwarded-allow-ips "*", so the client address in the access log is
+# whatever X-Forwarded-For says. Recorded, not asserted: behind Dockhold
+# only the edge reaches the app, and what the edge does with a client's
+# own X-Forwarded-For is the edge's business, not this image's.
+http GET "/api/v1/users/" "" "" -H 'X-Forwarded-For: 203.0.113.9'
+FWD_SEEN=$(app_logs | grep -F '"GET /api/v1/users/ HTTP/1.1" 401' | tail -n 1 | grep -o '[0-9.]*:[0-9]* - "GET' | cut -d' ' -f1)
+info "with X-Forwarded-For: 203.0.113.9 the access log records the client as ${FWD_SEEN:-?} (upstream trusts forwarded headers from any address)"
 
 # ---------------------------------------------------------------------------
 echo "==== Session key file damaged or missing"
@@ -534,6 +560,7 @@ wait_health || ok=false
 [ -n "$(login "$EMAIL_A_LC" "$PASS_1")" ] || { ok=false; echo "  admin does not log in with the bound key"; }
 [ "$(as_root "$D_MAIN" 'test -e /data/.dockhold/webui-secret-key && echo yes || echo no')" = no ] || { ok=false; echo "  a key file appeared while WEBUI_SECRET_KEY was bound"; }
 report "key file deleted, WEBUI_SECRET_KEY bound to the old key: starts, the old token still works, no file written" $ok
+log_clean "bound-key start" "${ALL_VALUES[@]}"
 # Put the file back for anything that follows.
 stop_app
 as_root "$D_MAIN" "printf '%s\n' '$KEY_CONTENT' > /data/.dockhold/webui-secret-key && chown 1001:1001 /data/.dockhold/webui-secret-key && chmod 600 /data/.dockhold/webui-secret-key"
@@ -549,7 +576,7 @@ interrupted_case() { # LABEL KILL_FN
   docker kill -s KILL "$APP" >/dev/null 2>&1 || true
   local phase="before the loopback server opened"
   if app_logs | grep -q 'authenticate_user'; then phase="admin created, marker not yet written"
-  elif app_logs | grep -qF "$BOOTSTRAP_LINE"; then phase="after the admin was created"
+  elif app_logs | grep -qF -- "$BOOTSTRAP_LINE"; then phase="after the admin was created"
   elif listener_opened; then phase="after the loopback server opened"; fi
   [ "$(as_root "$d" 'test -e /data/.dockhold/template && echo yes || echo no')" = no ] || { ok=false; echo "  a marker exists after a kill during the verify pass"; }
   keybefore=$(as_root "$d" 'cat /data/.dockhold/webui-secret-key 2>/dev/null || true')
@@ -566,6 +593,7 @@ interrupted_case() { # LABEL KILL_FN
     [ "$keybefore" = "$keyafter" ] || { ok=false; echo "  the key written before the kill was replaced"; }
   fi
   report "interrupted first start ($label, $phase): healthy, one admin, signup refused, key kept" $ok
+  log_clean "interrupted first start ($label) retry" "${ALL_VALUES[@]}" "$keyafter"
   stop_app
 }
 kill_1s() { sleep 1; }
@@ -573,7 +601,7 @@ kill_5s() { sleep 5; }
 kill_after_bootstrap() {
   local i
   for i in $(seq 1 1200); do
-    app_logs | grep -qF "$BOOTSTRAP_LINE" && return 0
+    app_logs | grep -qF -- "$BOOTSTRAP_LINE" && return 0
     app_running || return 0
     sleep 0.1
   done
@@ -605,6 +633,33 @@ interrupted_case "KILL at 5 s" kill_5s
 interrupted_case "KILL right after the bootstrap log line" kill_after_bootstrap
 interrupted_case "KILL when the loopback health first answers" kill_at_loopback_health
 interrupted_case "KILL during the loopback sign-in" kill_during_signin
+
+# The platform's stop signal during the pass: the start script forwards it
+# to the loopback server, waits for it, and exits 143. No marker, key kept,
+# and the next start comes up.
+D_TERM=$(new_datadir)
+start_app -e DATA_DIR=/data -v "$D_TERM:/data" "${ADDR[@]}" "${SECRETS_A[@]}"
+sleep 20
+docker stop -t 60 "$APP" >/dev/null 2>&1 || true
+ok=true
+code=$(docker inspect -f '{{.State.ExitCode}}' "$APP")
+[ "$code" = 143 ] || { ok=false; echo "  exit code after SIGTERM: $code (want 143)"; }
+[ "$(as_root "$D_TERM" 'test -e /data/.dockhold/template && echo yes || echo no')" = no ] || { ok=false; echo "  a marker exists after SIGTERM during the pass"; }
+KEY_TERM=$(as_root "$D_TERM" 'cat /data/.dockhold/webui-secret-key 2>/dev/null || true')
+[ -n "$KEY_TERM" ] || { ok=false; echo "  no key file after SIGTERM"; }
+[ "$(verify_lines)" = 1 ] || { ok=false; echo "  verify line count $(verify_lines) (was the pass running at 20 s?)"; }
+report "SIGTERM 20 s into the first start: exit 143, no marker, key file present" $ok
+start_app -e DATA_DIR=/data -v "$D_TERM:/data" "${ADDR[@]}" "${SECRETS_A[@]}"
+ok=true
+wait_health_watching_port || { ok=false; echo "  not healthy after SIGTERM retry"; }
+[ -z "$EARLY_ANSWER" ] || { ok=false; echo "  public port answered $EARLY_ANSWER before the marker"; }
+TOK_T=$(login "$EMAIL_A_LC" "$PASS_1")
+[ -n "$TOK_T" ] || { ok=false; echo "  admin does not log in"; }
+one_admin "$TOK_T" || { ok=false; echo "  users: $(users_json "$TOK_T")"; }
+[ "$(as_root "$D_TERM" 'cat /data/.dockhold/webui-secret-key')" = "$KEY_TERM" ] || { ok=false; echo "  key replaced on the retry"; }
+report "SIGTERM retry: healthy, one admin, key kept" $ok
+log_clean "SIGTERM retry" "${ALL_VALUES[@]}" "$KEY_TERM"
+stop_app
 
 # ---------------------------------------------------------------------------
 echo "==== Bootstrap failure that passes the value checks"
@@ -644,8 +699,8 @@ code=$(wait_exit)
 [ "$(app_logs | tail -n 1)" = "$NO_ADMIN_LINE" ] || { ok=false; echo "  last log line is not the no-admin refusal: $(app_logs | tail -n 1 | cut -c1-120)"; }
 app_logs | grep -q 'Error creating admin account' || { ok=false; echo "  upstream did not report the bootstrap failure (is the fault in place?)"; }
 [ "$(as_root "$D_FAULT" 'test -e /data/.dockhold/template && echo yes || echo no')" = no ] || { ok=false; echo "  a marker was written"; }
-if app_logs | grep -qF "$PASS_1"; then ok=false; echo "  password echoed"; fi
 report "bootstrap fails after the checks (user table refuses inserts): no-admin line last, exit 1, no marker, public port never answered" $ok
+log_clean "bootstrap failure" "${ALL_VALUES[@]}" "$(as_root "$D_FAULT" 'cat /data/.dockhold/webui-secret-key 2>/dev/null || true')"
 docker run --rm -i "${FAULT_ENV[@]}" "$IMAGE" - >/dev/null 2>&1 <<'PYFAULT' || echo "  (fault removal exited non-zero)"
 import os, sqlite3
 db = sqlite3.connect(os.path.join(os.environ["DATA_DIR"], "webui.db"))
@@ -661,6 +716,100 @@ TOK_F=$(login "$EMAIL_A_LC" "$PASS_1")
 one_admin "$TOK_F" || { ok=false; echo "  users: $(users_json "$TOK_F")"; }
 [[ "$(signup_code "stranger-$(rand_hex 3)@example.com")" =~ ^4 ]] || { ok=false; echo "  signup not refused"; }
 report "fault removed: next start creates the admin, logs in, one admin, signup refused" $ok
+log_clean "fault removed" "${ALL_VALUES[@]}" "$(as_root "$D_FAULT" 'cat /data/.dockhold/webui-secret-key 2>/dev/null || true')"
+stop_app
+
+# ---------------------------------------------------------------------------
+echo "==== Established install whose user table is empty"
+# Marker and key present, but the database has no accounts (a restore of
+# an empty database, or one emptied by hand) and the insert fault is back:
+# the pass must run on the marker alone being present, refuse, and keep
+# the port closed; without the fault the admin is created again.
+docker run --rm -i "${FAULT_ENV[@]}" "$IMAGE" - >/dev/null 2>&1 <<'PYFAULT' || echo "  (empty-users setup exited non-zero)"
+import os, sqlite3
+db = sqlite3.connect(os.path.join(os.environ["DATA_DIR"], "webui.db"))
+db.execute("DELETE FROM auth")
+db.execute("DELETE FROM user")
+db.execute("CREATE TRIGGER block_users BEFORE INSERT ON user BEGIN SELECT RAISE(ABORT, 'blocked'); END")
+db.commit()
+PYFAULT
+[ "$(as_root "$D_FAULT" 'test -e /data/.dockhold/template && echo yes || echo no')" = yes ] || echo "  (control: the marker is missing before the case)"
+start_app -e DATA_DIR=/data -v "$D_FAULT:/data" "${ADDR[@]}" "${SECRETS_A[@]}"
+ok=true
+EARLY=""
+for i in $(seq 1 1200); do
+  app_running || break
+  code=$(docker exec "$CURL" curl -s -m 3 -o /dev/null -w '%{http_code}' "$URL/health" 2>/dev/null) || true
+  [ -n "$code" ] || code=000
+  [ "$code" = 000 ] || { EARLY=$code; docker kill "$APP" >/dev/null 2>&1; break; }
+  sleep 0.5
+done
+code=$(wait_exit)
+[ "$code" = 1 ] || { ok=false; echo "  exit code: $code (want 1)"; }
+[ -z "$EARLY" ] || { ok=false; echo "  public port answered $EARLY with no accounts in the database"; }
+[ "$(verify_lines)" = 1 ] || { ok=false; echo "  verify line count $(verify_lines): the pass did not run on an empty user table"; }
+[ "$(app_logs | tail -n 1)" = "$NO_ADMIN_LINE" ] || { ok=false; echo "  last log line: $(app_logs | tail -n 1 | cut -c1-120)"; }
+report "marker present, user table empty, insert fault: the pass runs, refuses, public port never answered" $ok
+docker run --rm -i "${FAULT_ENV[@]}" "$IMAGE" - >/dev/null 2>&1 <<'PYFAULT' || echo "  (fault removal exited non-zero)"
+import os, sqlite3
+db = sqlite3.connect(os.path.join(os.environ["DATA_DIR"], "webui.db"))
+db.execute("DROP TRIGGER block_users")
+db.commit()
+PYFAULT
+start_app -e DATA_DIR=/data -v "$D_FAULT:/data" "${ADDR[@]}" "${SECRETS_A[@]}"
+ok=true
+wait_health_watching_port || { ok=false; echo "  not healthy"; }
+[ -z "$EARLY_ANSWER" ] || { ok=false; echo "  public port answered $EARLY_ANSWER before the pass finished"; }
+[ "$(verify_lines)" = 1 ] || { ok=false; echo "  verify line count $(verify_lines)"; }
+TOK_E=$(login "$EMAIL_A_LC" "$PASS_1")
+[ -n "$TOK_E" ] || { ok=false; echo "  admin does not log in"; }
+one_admin "$TOK_E" || { ok=false; echo "  users: $(users_json "$TOK_E")"; }
+report "marker present, user table empty, fault removed: the pass runs, admin created, logs in" $ok
+stop_app
+
+# ---------------------------------------------------------------------------
+echo "==== Restore without the marker on a populated database"
+# The admin changed the password in the panel, then the storage was
+# restored without .dockhold/template. The pass runs, the bound secrets no
+# longer match the admin, and the refusal line has to be true for that.
+# Binding the current password recovers.
+D_RESTORE=$(new_datadir)
+start_app -e DATA_DIR=/data -v "$D_RESTORE:/data" "${ADDR[@]}" "${SECRETS_A[@]}"
+ok=true
+wait_health || { ok=false; echo "  not healthy"; }
+TOK_R=$(login "$EMAIL_A_LC" "$PASS_1")
+http POST /api/v1/auths/update/password "$(jq -cn --arg p "$PASS_1" --arg n "$PASS_2" '{password:$p,new_password:$n}')" "$TOK_R"
+[ "$HTTP_CODE" = 200 ] || { ok=false; echo "  password change returned $HTTP_CODE"; }
+[ -n "$(login "$EMAIL_A_LC" "$PASS_2")" ] || { ok=false; echo "  control failed: the changed password does not log in"; }
+report "populated database: admin changed the password in the panel" $ok
+info "session after a password change inside Open WebUI (no session store): the token used for the change now gets $(token_works "$TOK_R") (200 = still valid, as the README says)"
+stop_app
+as_root "$D_RESTORE" 'rm -f /data/.dockhold/template'
+start_app -e DATA_DIR=/data -v "$D_RESTORE:/data" "${ADDR[@]}" "${SECRETS_A[@]}"
+ok=true
+EARLY=""
+for i in $(seq 1 1200); do
+  app_running || break
+  code=$(docker exec "$CURL" curl -s -m 3 -o /dev/null -w '%{http_code}' "$URL/health" 2>/dev/null) || true
+  [ -n "$code" ] || code=000
+  [ "$code" = 000 ] || { EARLY=$code; docker kill "$APP" >/dev/null 2>&1; break; }
+  sleep 0.5
+done
+code=$(wait_exit)
+[ "$code" = 1 ] || { ok=false; echo "  exit code: $code (want 1)"; }
+[ -z "$EARLY" ] || { ok=false; echo "  public port answered $EARLY"; }
+[ "$(app_logs | tail -n 1)" = "$NO_ADMIN_LINE" ] || { ok=false; echo "  last log line: $(app_logs | tail -n 1 | cut -c1-120)"; }
+[ "$(as_root "$D_RESTORE" 'test -e /data/.dockhold/template && echo yes || echo no')" = no ] || { ok=false; echo "  a marker was written"; }
+report "marker removed, bound password no longer matches: the pass refuses with the mismatch line, exit 1, no marker" $ok
+log_clean "restore without marker, refused" "${ALL_VALUES[@]}"
+start_app -e DATA_DIR=/data -v "$D_RESTORE:/data" "${ADDR[@]}" -e "WEBUI_ADMIN_EMAIL=$EMAIL_A" -e "WEBUI_ADMIN_PASSWORD=$PASS_2" -e "OPENAI_API_KEY=$KEY_1"
+ok=true
+wait_health_watching_port || { ok=false; echo "  not healthy with the current password bound"; }
+[ -z "$EARLY_ANSWER" ] || { ok=false; echo "  public port answered $EARLY_ANSWER before the marker"; }
+[ -n "$(login "$EMAIL_A_LC" "$PASS_2")" ] || { ok=false; echo "  admin does not log in"; }
+[ "$(as_root "$D_RESTORE" 'test -e /data/.dockhold/template && echo yes || echo no')" = yes ] || { ok=false; echo "  marker not written"; }
+report "current password bound: the pass signs in, marker written, healthy" $ok
+log_clean "restore without marker, recovered" "${ALL_VALUES[@]}"
 stop_app
 
 # A database that cannot be opened at all (webui.db is a directory): the
@@ -711,6 +860,7 @@ if wait_health; then
   UP1G=$HTTP_CODE
   sleep 5
   info "at --memory 1g: first start (verify pass + public start) to /health ${WAITED}s; signin $([ -n "$TOK_1G" ] && echo ok || echo failed); PDF upload $UP1G; memory.peak $(mem_peak_mib) MiB; OOM-killed: $(app_oom); still running: $(app_running && echo yes || echo no)"
+  log_clean "1 GB run" "${ALL_VALUES[@]}" "$(as_root "$D_1G" 'cat /data/.dockhold/webui-secret-key 2>/dev/null || true')"
 else
   info "at --memory 1g: did not become healthy within the limit; OOM-killed: $(app_oom); exit code: $(docker inspect -f '{{.State.ExitCode}}' "$APP" 2>/dev/null)"
 fi

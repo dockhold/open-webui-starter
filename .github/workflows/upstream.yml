@@ -15,7 +15,7 @@ jobs:
   compare:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Compare the pinned version with the latest release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -25,14 +25,24 @@ jobs:
           pinned=$(sed -n 's|^FROM ghcr.io/open-webui/open-webui:v\([0-9][0-9.]*\)@sha256:[0-9a-f]\{64\}$|\1|p' Dockerfile | head -n 1)
           [ -n "$pinned" ] || { echo "could not read the pinned version from the Dockerfile"; exit 1; }
           latest=$(gh api repos/open-webui/open-webui/releases/latest --jq '.tag_name' | sed 's/^v//')
-          [ -n "$latest" ] || { echo "could not read the latest release"; exit 1; }
+          # The tag comes from outside; only digits and dots reach the image
+          # reference, the issue title and body, or the digest lookup.
+          case "$latest" in
+            *[!0-9.]*|"") echo "unexpected tag: $latest"; exit 1 ;;
+          esac
           echo "pinned: $pinned, latest: $latest"
           if [ "$pinned" = "$latest" ]; then
             echo "up to date"
             exit 0
           fi
           digest=$(docker buildx imagetools inspect "ghcr.io/open-webui/open-webui:v${latest}" --raw 2>/dev/null \
-            | jq -r '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest' || true)
+            | jq -r '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest' | head -n 1 || true)
+          # Only a well-formed digest goes into the issue; anything else is
+          # left for the maintainer to look up.
+          case "$digest" in
+            sha256:*) [ "${#digest}" -eq 71 ] && [ -z "$(printf '%s' "${digest#sha256:}" | tr -d '0-9a-f')" ] || digest="" ;;
+            *) digest="" ;;
+          esac
           title="Upstream release: Open WebUI ${latest} (pinned ${pinned})"
           body=$(cat <<BODY
           Open WebUI **v${latest}** is the latest release; this starter pins **${pinned}**.
