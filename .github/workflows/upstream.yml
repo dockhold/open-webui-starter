@@ -1,0 +1,62 @@
+name: Upstream release check
+# Once a week, compare the Open WebUI version pinned in the Dockerfile with
+# the latest upstream release. When they differ, open one issue (or update
+# the open one) with the new version, its image digest, and the upgrade
+# steps. Digest pinning keeps rebuilds identical; this is what keeps the pin
+# from going stale unnoticed.
+on:
+  schedule:
+    - cron: '23 6 * * 1'
+  workflow_dispatch:
+permissions:
+  contents: read
+  issues: write
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare the pinned version with the latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          pinned=$(sed -n 's|^FROM ghcr.io/open-webui/open-webui:v\([0-9][0-9.]*\)@sha256:[0-9a-f]\{64\}$|\1|p' Dockerfile | head -n 1)
+          [ -n "$pinned" ] || { echo "could not read the pinned version from the Dockerfile"; exit 1; }
+          latest=$(gh api repos/open-webui/open-webui/releases/latest --jq '.tag_name' | sed 's/^v//')
+          [ -n "$latest" ] || { echo "could not read the latest release"; exit 1; }
+          echo "pinned: $pinned, latest: $latest"
+          if [ "$pinned" = "$latest" ]; then
+            echo "up to date"
+            exit 0
+          fi
+          digest=$(docker buildx imagetools inspect "ghcr.io/open-webui/open-webui:v${latest}" --raw 2>/dev/null \
+            | jq -r '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest' || true)
+          title="Upstream release: Open WebUI ${latest} (pinned ${pinned})"
+          body=$(cat <<BODY
+          Open WebUI **v${latest}** is the latest release; this starter pins **${pinned}**.
+
+          Release notes: https://github.com/open-webui/open-webui/releases/tag/v${latest}
+
+          To upgrade:
+
+          1. Read the release notes for schema changes and anything that touches the session key, the admin bootstrap variables, or the persisted settings.
+          2. Get the linux/amd64 digest of the new image: \`docker buildx imagetools inspect ghcr.io/open-webui/open-webui:v${latest}\` (the weekly check read \`${digest:-<not readable this run>}\`).
+          3. In the Dockerfile change the tag and the digest on the FROM line together; in entrypoint.sh set \`TEMPLATE_VERSION="${latest}"\`.
+          4. Push a branch; the Check workflow verifies the digest, builds the image and runs the smoke test.
+          5. Test the upgrade on a populated install with a backup taken first.
+          6. Add a CHANGELOG entry that says whether the upgrade changes data, then merge.
+
+          This issue is updated by the weekly upstream check until the pin moves.
+          BODY
+          )
+          gh label create upstream --description "Upstream release moved" --color 0E8A16 --force >/dev/null 2>&1 || true
+          existing=$(gh issue list --state open --label upstream --search "Upstream release: Open WebUI in:title" \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --title "$title" --body "$body"
+            echo "updated issue #$existing"
+          else
+            gh issue create --title "$title" --body "$body" --label upstream
+          fi

@@ -1,0 +1,40 @@
+name: Check
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pinned version, tag and digest agree
+        # The Dockerfile pins a tag and a digest; the start script writes the
+        # same version into the install marker. All three must say the same
+        # thing, and the digest must be the linux/amd64 manifest of that tag.
+        run: |
+          set -eu
+          tag=$(sed -n 's|^FROM ghcr.io/open-webui/open-webui:v\([0-9][0-9.]*\)@sha256:[0-9a-f]\{64\}$|\1|p' Dockerfile | head -n 1)
+          digest=$(sed -n 's|^FROM ghcr.io/open-webui/open-webui:v[0-9][0-9.]*@\(sha256:[0-9a-f]\{64\}\)$|\1|p' Dockerfile | head -n 1)
+          script=$(sed -n 's/^TEMPLATE_VERSION="\([0-9][0-9.]*\)"$/\1/p' entrypoint.sh | head -n 1)
+          [ -n "$tag" ] && [ -n "$digest" ] || { echo "could not read the tag and digest from the FROM line"; exit 1; }
+          [ "$tag" = "$script" ] || { echo "Dockerfile pins $tag, entrypoint.sh says $script"; exit 1; }
+          amd64=$(docker buildx imagetools inspect "ghcr.io/open-webui/open-webui:v$tag" --raw \
+            | jq -r '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest')
+          [ "$amd64" = "$digest" ] || { echo "tag v$tag has amd64 digest $amd64, Dockerfile pins $digest"; exit 1; }
+          echo "v$tag @ $digest"
+      - name: Build the image
+        run: docker build -t open-webui-starter:test .
+      - name: Image size
+        # The README says the app needs a paid plan because of its image
+        # size. Print the number that claim rests on. The compressed size is
+        # the sum of the layer sizes in the registry manifest, which is what
+        # a registry counts; docker image inspect gives the uncompressed size.
+        run: |
+          set -eu
+          digest=$(sed -n 's|^FROM ghcr.io/open-webui/open-webui:v[0-9][0-9.]*@\(sha256:[0-9a-f]\{64\}\)$|\1|p' Dockerfile | head -n 1)
+          upstream=$(docker buildx imagetools inspect "ghcr.io/open-webui/open-webui@$digest" --raw | jq '[.layers[].size] | add')
+          uncompressed=$(docker image inspect open-webui-starter:test --format '{{.Size}}')
+          echo "upstream compressed (manifest layer sizes): $((upstream / 1048576)) MiB ($upstream bytes); this image adds a few KB"
+          echo "uncompressed: $((uncompressed / 1048576)) MiB ($uncompressed bytes)"
+      - name: Smoke test
+        run: tests/smoke.sh open-webui-starter:test
