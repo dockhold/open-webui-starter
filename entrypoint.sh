@@ -1,16 +1,17 @@
 #!/bin/sh
 # Start script for Open WebUI on Dockhold.
 #
-# Dockhold hands this app a port (PORT, read by upstream's own start script)
-# and, when App storage is turned on, a folder that survives restarts
-# (DATA_DIR). The admin account and the model provider key come from
-# Dockhold's Secrets as WEBUI_ADMIN_EMAIL, WEBUI_ADMIN_PASSWORD and
-# OPENAI_API_KEY. This script checks those, puts every file Open WebUI
-# writes on App storage, guards the session key, and then hands over to
-# upstream's start.sh. It reads DATA_DIR, DATABASE_URL, DOCKHOLD_APP_URL,
-# the three secrets, and the optional overrides WEBUI_SECRET_KEY,
-# WEBUI_URL, ENABLE_OLLAMA_API, OPENAI_API_BASE_URL, JWT_EXPIRES_IN and
-# ENABLE_SIGNUP. It never prints a secret value.
+# Dockhold hands this app a port (PORT) and, when App storage is turned on,
+# a folder that survives restarts (DATA_DIR). The admin account and the
+# model provider key come from Dockhold's Secrets as WEBUI_ADMIN_EMAIL,
+# WEBUI_ADMIN_PASSWORD and OPENAI_API_KEY. This script checks those, puts
+# every file Open WebUI writes on App storage, guards the session key, on
+# the first start proves the admin account exists before the port opens,
+# and then hands over to upstream's start.sh. It reads PORT, DATA_DIR,
+# DATABASE_URL, DOCKHOLD_APP_URL, the three secrets, and the optional
+# overrides WEBUI_SECRET_KEY, WEBUI_URL, ENABLE_OLLAMA_API,
+# OPENAI_API_BASE_URL, JWT_EXPIRES_IN and ENABLE_SIGNUP. It never prints a
+# secret value.
 #
 # Every check below fails with one line and exit code 1. Dockhold shows that
 # line on the app page, so the line is the whole error message.
@@ -27,7 +28,7 @@ TEMPLATE_VERSION="0.11.3"
 # purpose: it would look like it works and lose every chat on the first
 # restart.
 storage_missing() {
-  echo "This app keeps its data on App storage. Turn on App storage in the Size tab and redeploy." >&2
+  echo "This app keeps its data on App storage. Turn on App storage in the Size tab; the app restarts on its own." >&2
   exit 1
 }
 [ -n "${DATA_DIR:-}" ] || storage_missing
@@ -47,7 +48,7 @@ rm -f "$probe"
 # better than a quiet move. Support for the managed database is a later,
 # tested change.
 if [ -n "${DATABASE_URL:-}" ]; then
-  echo "This template keeps Open WebUI's data on App storage and does not use the managed database yet. Turn the managed database off for this app and redeploy." >&2
+  echo "This template keeps Open WebUI's data on App storage and does not use the managed database yet. Turn the managed database off for this app and restart it." >&2
   exit 1
 fi
 
@@ -59,17 +60,19 @@ fi
 # when that fails it logs the failure and starts anyway, with no admin and
 # with the first person to reach the URL able to sign up as the admin
 # instead. So the values are checked here, with the same limits upstream
-# applies. The values themselves are never printed.
+# applies, and step 6 then proves the account exists before the port
+# opens. The values themselves are never printed.
 missing=""
+verb="is"
 [ -n "${WEBUI_ADMIN_EMAIL:-}" ] || missing="WEBUI_ADMIN_EMAIL"
 [ -n "${WEBUI_ADMIN_PASSWORD:-}" ] || missing="${missing:+$missing, }WEBUI_ADMIN_PASSWORD"
 [ -n "${OPENAI_API_KEY:-}" ] || missing="${missing:+$missing, }OPENAI_API_KEY"
 if [ -n "$missing" ]; then
   # "A, B, C" reads as "A, B and C".
   case "$missing" in
-    *,*) missing="$(printf '%s' "$missing" | sed 's/, \([^,]*\)$/ and \1/')" ;;
+    *,*) missing="$(printf '%s' "$missing" | sed 's/, \([^,]*\)$/ and \1/')"; verb="are" ;;
   esac
-  echo "$missing is missing or empty. Add WEBUI_ADMIN_EMAIL, WEBUI_ADMIN_PASSWORD and OPENAI_API_KEY as secrets on this app's Variables tab and restart." >&2
+  echo "$missing $verb missing or empty. Add WEBUI_ADMIN_EMAIL, WEBUI_ADMIN_PASSWORD and OPENAI_API_KEY as secrets on this app's Variables tab and restart." >&2
   exit 1
 fi
 case "$WEBUI_ADMIN_EMAIL" in
@@ -110,10 +113,11 @@ chmod 00700 "$DH"
 # before.
 #
 # The order matters for an interrupted first start. The key is created
-# first and the established-install marker (step 6) only after it, so a
-# kill at any point leaves either nothing (the next start is a first
-# start again) or a key file and a marker that agree. There is no state in
-# which the marker says "established" while the key was never written.
+# first and the established-install marker (step 7) only after it and
+# after the admin account has been verified (step 6), so a kill at any
+# point leaves either nothing (the next start is a first start again) or a
+# key file and a marker that agree. There is no state in which the marker
+# says "established" while the key was never written.
 #
 # A bound WEBUI_SECRET_KEY wins over the file, as it does upstream. That is
 # the recovery path for a lost or damaged file, so none of the file checks
@@ -146,16 +150,7 @@ if [ -z "${WEBUI_SECRET_KEY:-}" ]; then
   fi
 fi
 
-# 6. Established-install marker.
-#
-# Written only after every check above passed and the session key exists,
-# so it is on a storage folder that has actually run this template. Its
-# presence means "an existing installation": from now on a missing key
-# file is an error (step 5), never a silent new key. Nothing in this script
-# ever wipes or re-seeds a folder, with or without the marker.
-printf 'open-webui-starter %s\n' "$TEMPLATE_VERSION" > "$DH/template"
-
-# 7. Where Open WebUI writes, and the settings it starts from.
+# 6. Where Open WebUI writes, and the settings it starts from.
 #
 # HOME: upstream runs as root with HOME=/root, which user 1001 cannot write.
 # Anything a library keeps under the home folder lands on App storage
@@ -182,17 +177,109 @@ export DATA_DIR
 #                     on its own, stop a first user from signing up while
 #                     no account exists at all: upstream always lets the
 #                     first account in. That is why step 3 refuses every
-#                     value the admin bootstrap would fail on.
+#                     value the admin bootstrap would fail on, and why
+#                     step 7 does not open the port until the account is
+#                     there.
 export WEBUI_URL="${WEBUI_URL:-${DOCKHOLD_APP_URL:-}}"
 export ENABLE_OLLAMA_API="${ENABLE_OLLAMA_API:-false}"
 export OPENAI_API_BASE_URL="${OPENAI_API_BASE_URL:-https://api.openai.com/v1}"
 export JWT_EXPIRES_IN="${JWT_EXPIRES_IN:-7d}"
 export ENABLE_SIGNUP="${ENABLE_SIGNUP:-false}"
 
-# 8. Hand over to Open WebUI.
+cd /app/backend
+
+# 7. First start only: prove the admin account before opening the port.
+#
+# Open WebUI creates the admin from the variables during its startup and,
+# if that fails, keeps going with no accounts at all; and while no account
+# exists, its signup endpoint accepts the first caller as admin whatever
+# the signup setting says. The value checks in step 3 stop every failure
+# this script can see coming; this step stops the ones it cannot. On a
+# storage folder without the established-install marker, upstream is
+# started on the loopback address and an internal port (unreachable from
+# outside), the admin signs in there, and only then is the marker written
+# and the real server started on Dockhold's port. Nothing listens on that
+# port until the account is proven. A refusal here writes no marker, so
+# the next start repeats this step; upstream creates the admin only while
+# no users exist, which is the state a failed first start leaves behind.
+# An established installation skips this step, so the extra start (half a
+# minute or more) is paid once per installation.
+#
+# A kill during this step leaves no marker and, at most, an admin account
+# that the next pass finds by signing in. The stop signal is forwarded to
+# the inner server so it closes its database cleanly.
+if [ ! -e "$DH/template" ]; then
+  echo "Verifying the admin account before opening the port"
+  VERIFY_PORT=8079
+  [ "${PORT:-8080}" != "$VERIFY_PORT" ] || VERIFY_PORT=8078
+  HOST=127.0.0.1 PORT="$VERIFY_PORT" bash start.sh &
+  vpid=$!
+  trap 'kill -TERM "$vpid" 2>/dev/null; wait "$vpid" 2>/dev/null; exit 143' TERM INT
+  # A child that has exited shows as a zombie until it is waited for, and
+  # kill -0 still succeeds on a zombie, so the state comes from /proc.
+  verify_alive() {
+    [ -r "/proc/$vpid/status" ] && ! grep -q '^State:[[:space:]]*Z' "/proc/$vpid/status"
+  }
+  verify_stop() {
+    trap - TERM INT
+    kill -TERM "$vpid" 2>/dev/null || true
+    wait "$vpid" 2>/dev/null || true
+  }
+  healthy=""
+  i=0
+  while [ $i -lt 240 ]; do
+    if ! verify_alive; then
+      verify_stop
+      echo "Open WebUI stopped during the first start before the admin account could be verified. The lines above say why." >&2
+      exit 1
+    fi
+    if curl -sf -m 3 -o /dev/null "http://127.0.0.1:$VERIFY_PORT/health"; then healthy=yes; break; fi
+    sleep 1
+    i=$((i + 1))
+  done
+  if [ -z "$healthy" ]; then
+    verify_stop
+    echo "Open WebUI did not answer its health check within 240 seconds during the first start. Restart the app; if it happens again, give it more memory in the Size tab." >&2
+    exit 1
+  fi
+  # The sign-in is made by Python so the password stays in the environment
+  # and never appears on a command line or in the log. Success means a 200
+  # whose account has the admin role.
+  if VERIFY_PORT="$VERIFY_PORT" python3 - <<'PY'
+import json, os, sys, urllib.request
+url = "http://127.0.0.1:%s/api/v1/auths/signin" % os.environ["VERIFY_PORT"]
+body = json.dumps({"email": os.environ["WEBUI_ADMIN_EMAIL"],
+                   "password": os.environ["WEBUI_ADMIN_PASSWORD"]}).encode()
+req = urllib.request.Request(url, data=body, method="POST",
+                             headers={"Content-Type": "application/json"})
+try:
+    with urllib.request.urlopen(req, timeout=30) as r:
+        ok = r.status == 200 and json.load(r).get("role") == "admin"
+except Exception:
+    ok = False
+sys.exit(0 if ok else 1)
+PY
+  then
+    verify_stop
+  else
+    verify_stop
+    echo "The admin account could not be created. Check WEBUI_ADMIN_EMAIL and WEBUI_ADMIN_PASSWORD on this app's Variables tab and restart." >&2
+    exit 1
+  fi
+
+  # 8. Established-install marker.
+  #
+  # Written only now: every check passed, the session key exists, and the
+  # admin account has signed in. Its presence means "an existing
+  # installation": from now on a missing key file is an error (step 5),
+  # never a silent new key, and step 7 is skipped. Nothing in this script
+  # ever wipes or re-seeds a folder, with or without the marker.
+  printf 'open-webui-starter %s\n' "$TEMPLATE_VERSION" > "$DH/template"
+fi
+
+# 9. Hand over to Open WebUI.
 #
 # Upstream's start.sh reads PORT and the key file, then execs the server,
 # so the server is the main process and the stop signal from the platform
 # reaches it directly.
-cd /app/backend
 exec bash start.sh

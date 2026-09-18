@@ -11,7 +11,9 @@
 # Needs: docker, jq, bash 4 or newer. Exits non-zero if any case fails.
 # Prints one PASS or FAIL line per case, INFO lines for measurements, and the
 # container log after a failure. A full run starts the app about ten times
-# and each cold start takes half a minute or more, so expect ten minutes.
+# and each cold start takes half a minute or more (a first start on fresh
+# storage takes two: the admin is verified on loopback before the port
+# opens), so expect fifteen minutes.
 set -euo pipefail
 
 IMAGE=${1:?usage: tests/smoke.sh <image>}
@@ -25,8 +27,11 @@ PORT=8080
 URL="http://owui:$PORT"
 MEM=2g
 BASE=$(mktemp -d "${TMPDIR:-/tmp}/owuismoke.XXXXXX")
-STORAGE_LINE="This app keeps its data on App storage. Turn on App storage in the Size tab and redeploy."
-DB_LINE="This template keeps Open WebUI's data on App storage and does not use the managed database yet. Turn the managed database off for this app and redeploy."
+STORAGE_LINE="This app keeps its data on App storage. Turn on App storage in the Size tab; the app restarts on its own."
+DB_LINE="This template keeps Open WebUI's data on App storage and does not use the managed database yet. Turn the managed database off for this app and restart it."
+VERIFY_LINE="Verifying the admin account before opening the port"
+NO_ADMIN_LINE="The admin account could not be created. Check WEBUI_ADMIN_EMAIL and WEBUI_ADMIN_PASSWORD on this app's Variables tab and restart."
+STOPPED_LINE="Open WebUI stopped during the first start before the admin account could be verified. The lines above say why."
 KEY_MISSING_LINE="The app's session key is missing from App storage. Restore it from your backup or bind WEBUI_SECRET_KEY to the previous value."
 KEY_DAMAGED_LINE="The app's session key file on App storage is damaged. Bind WEBUI_SECRET_KEY to the previous key or restore the file from your backup; the file is never overwritten."
 BOOTSTRAP_LINE="Admin account created successfully"
@@ -109,10 +114,11 @@ wait_health() {
 }
 WAITED=""
 
-# Prints the exit code once the container has exited, or "running".
+# Prints the exit code once the container has exited, or "running". The
+# limit covers a loopback verify pass that ends in a refusal.
 wait_exit() {
   local i
-  for i in $(seq 1 120); do
+  for i in $(seq 1 1200); do
     if ! app_running; then docker inspect -f '{{.State.ExitCode}}' "$APP"; return 0; fi
     sleep 0.25
   done
@@ -177,6 +183,40 @@ token_works() { # TOKEN -> status of a protected listing
 }
 
 listener_opened() { app_logs | grep -q 'Started server process\|Uvicorn running'; }
+verify_lines() { app_logs | grep -cF "$VERIFY_LINE" || true; }
+marker_exists() { docker exec "$APP" test -e /data/.dockhold/template 2>/dev/null; }
+
+# wait_health_watching_port: like wait_health, but records the public
+# port's answer before and after the install marker appears. Sets
+# EARLY_ANSWER (any non-000 code seen while the marker was absent),
+# MARKER_AT (seconds until the marker appeared) and WAITED.
+wait_health_watching_port() {
+  local i t0 code seen_marker=""
+  EARLY_ANSWER=""
+  MARKER_AT=""
+  t0=$(date +%s.%N)
+  for i in $(seq 1 1200); do
+    app_running || return 1
+    code=$(docker exec "$CURL" curl -s -m 3 -o /dev/null -w '%{http_code}' "$URL/health" 2>/dev/null) || true
+    [ -n "$code" ] || code=000
+    if [ -z "$seen_marker" ]; then
+      if marker_exists; then
+        seen_marker=yes
+        MARKER_AT=$(printf '%.1f' "$(echo "$(date +%s.%N) - $t0" | bc)")
+      elif [ "$code" != 000 ]; then
+        EARLY_ANSWER=$code
+      fi
+    fi
+    if [ "$code" = 200 ]; then
+      WAITED=$(printf '%.1f' "$(echo "$(date +%s.%N) - $t0" | bc)")
+      return 0
+    fi
+    sleep 0.5
+  done
+  return 1
+}
+EARLY_ANSWER=""
+MARKER_AT=""
 
 # A refused-start case: the container must exit 1 with exactly one log line.
 expect_one_line_refusal() { # NAME EXPECTED_LINE [docker run args...]
@@ -277,7 +317,9 @@ secret_refusal "WEBUI_ADMIN_PASSWORD empty: names it, exit 1, no value, no liste
   -e "WEBUI_ADMIN_EMAIL=$EMAIL_A" -e WEBUI_ADMIN_PASSWORD= -e "OPENAI_API_KEY=$KEY_1"
 secret_refusal "OPENAI_API_KEY missing: names it, exit 1, no value, no listener" "OPENAI_API_KEY is missing" "$PASS_1" \
   -e "WEBUI_ADMIN_EMAIL=$EMAIL_A" -e "WEBUI_ADMIN_PASSWORD=$PASS_1"
-secret_refusal "all three missing: names all three, exit 1, no listener" "WEBUI_ADMIN_EMAIL, WEBUI_ADMIN_PASSWORD and OPENAI_API_KEY is missing" ""
+secret_refusal "two missing: names both with 'are', exit 1, no listener" "WEBUI_ADMIN_EMAIL and OPENAI_API_KEY are missing" "$PASS_1" \
+  -e "WEBUI_ADMIN_PASSWORD=$PASS_1"
+secret_refusal "all three missing: names all three, exit 1, no listener" "WEBUI_ADMIN_EMAIL, WEBUI_ADMIN_PASSWORD and OPENAI_API_KEY are missing" ""
 secret_refusal "admin email without @: refused, exit 1, no value, no listener" "WEBUI_ADMIN_EMAIL is not an email address" "$PASS_1" \
   -e "WEBUI_ADMIN_EMAIL=owner.example.com" -e "WEBUI_ADMIN_PASSWORD=$PASS_1" -e "OPENAI_API_KEY=$KEY_1"
 secret_refusal "7-character password: refused, exit 1, no value, no listener" "WEBUI_ADMIN_PASSWORD must be 8 to 72" "q7zK2m9" \
@@ -291,9 +333,17 @@ echo "==== First start"
 D_MAIN=$(new_datadir)
 start_app -e DATA_DIR=/data -v "$D_MAIN:/data" "${ADDR[@]}" "${SECRETS_A[@]}"
 ok=true
-wait_health || ok=false
+wait_health_watching_port || ok=false
 report "first start: /health answers 200" $ok
-[ "$ok" = true ] && info "cold start to /health at --memory $MEM: ${WAITED}s; memory.peak so far: $(mem_peak_mib) MiB"
+[ "$ok" = true ] && info "first start on fresh storage at --memory $MEM: marker after ${MARKER_AT}s (loopback verify pass), public /health after ${WAITED}s; memory.peak so far: $(mem_peak_mib) MiB"
+ok=true
+[ -z "$EARLY_ANSWER" ] || { ok=false; echo "  the public port answered $EARLY_ANSWER before the marker existed"; }
+[ -n "$MARKER_AT" ] || { ok=false; echo "  marker never seen"; }
+report "first start: public port refused every connection until the install marker existed, then answered" $ok
+ok=true
+[ "$(verify_lines)" = 1 ] || { ok=false; echo "  verify line count: $(verify_lines) (want 1)"; }
+[ "$(app_logs | grep -c 'Started server process')" = 2 ] || { ok=false; echo "  server starts in the log: $(app_logs | grep -c 'Started server process') (want 2: loopback, then public)"; }
+report "first start: exactly one loopback verify pass, two server starts in the log" $ok
 
 http GET / "" ""
 ok=true
@@ -382,10 +432,19 @@ info "memory.current after 10 s idle: $(mem_now_mib) MiB"
 # ---------------------------------------------------------------------------
 echo "==== Second start on the same storage"
 stop_app
+FIRST_WAITED=$WAITED
 start_app -e DATA_DIR=/data -v "$D_MAIN:/data" "${ADDR[@]}" "${SECRETS_A[@]}"
 ok=true
 wait_health || ok=false
-[ "$ok" = true ] && info "warm restart to /health: ${WAITED}s"
+report "second start: /health answers 200" $ok
+[ "$ok" = true ] && info "second start (established install) to /health: ${WAITED}s"
+ok=true
+[ "$(verify_lines)" = 0 ] || { ok=false; echo "  verify line count: $(verify_lines) (want 0)"; }
+[ "$(app_logs | grep -c 'Started server process')" = 1 ] || { ok=false; echo "  server starts: $(app_logs | grep -c 'Started server process') (want 1)"; }
+# Not doubled: the established path must take well under the first start.
+[ "$(echo "$WAITED * 1.5 < $FIRST_WAITED" | bc)" = 1 ] || { ok=false; echo "  second start ${WAITED}s is not clearly shorter than the first ${FIRST_WAITED}s"; }
+report "second start: established install skips the loopback pass (no verify line, one server start, ${WAITED}s vs ${FIRST_WAITED}s)" $ok
+ok=true
 TW=$(token_works "$TOK_A1")
 report "second start: token from the first start still works ($TW)" "$([ "$TW" = 200 ] && echo true || echo false)"
 TOK_A2=$(login "$EMAIL_A_LC" "$PASS_1")
@@ -488,11 +547,16 @@ interrupted_case() { # LABEL KILL_FN
   start_app -e DATA_DIR=/data -v "$d:/data" "${ADDR[@]}" "${SECRETS_A[@]}"
   $killfn
   docker kill -s KILL "$APP" >/dev/null 2>&1 || true
-  local phase="before the listener opened"
-  if app_logs | grep -qF "$BOOTSTRAP_LINE"; then phase="after the admin was created"; elif listener_opened; then phase="after the listener opened"; fi
+  local phase="before the loopback server opened"
+  if app_logs | grep -q 'authenticate_user'; then phase="admin created, marker not yet written"
+  elif app_logs | grep -qF "$BOOTSTRAP_LINE"; then phase="after the admin was created"
+  elif listener_opened; then phase="after the loopback server opened"; fi
+  [ "$(as_root "$d" 'test -e /data/.dockhold/template && echo yes || echo no')" = no ] || { ok=false; echo "  a marker exists after a kill during the verify pass"; }
   keybefore=$(as_root "$d" 'cat /data/.dockhold/webui-secret-key 2>/dev/null || true')
   start_app -e DATA_DIR=/data -v "$d:/data" "${ADDR[@]}" "${SECRETS_A[@]}"
-  wait_health || { ok=false; echo "  not healthy after the interrupted first start"; }
+  wait_health_watching_port || { ok=false; echo "  not healthy after the interrupted first start"; }
+  [ -z "$EARLY_ANSWER" ] || { ok=false; echo "  public port answered $EARLY_ANSWER before the marker on the retry"; }
+  [ "$(verify_lines)" = 1 ] || { ok=false; echo "  the retry did not run the verify pass"; }
   tok=$(login "$EMAIL_A_LC" "$PASS_1")
   [ -n "$tok" ] || { ok=false; echo "  admin does not log in"; }
   one_admin "$tok" || { ok=false; echo "  users: $(users_json "$tok")"; }
@@ -514,9 +578,102 @@ kill_after_bootstrap() {
     sleep 0.1
   done
 }
+# The loopback server is not reachable from the helper, so "health first
+# answers" is read from the log. Upstream's logger drops uvicorn's own
+# "startup complete" line; the last line of its startup sequence is the
+# scheduler worker's, and /health answers right after it. The sign-in line
+# comes next: health has answered, the start script is signing in, the
+# marker is not yet written.
+kill_at_loopback_health() {
+  local i
+  for i in $(seq 1 1200); do
+    app_logs | grep -q 'Scheduler worker started' && return 0
+    app_running || return 0
+    sleep 0.1
+  done
+}
+kill_during_signin() {
+  local i
+  for i in $(seq 1 1200); do
+    app_logs | grep -q 'authenticate_user' && return 0
+    app_running || return 0
+    sleep 0.1
+  done
+}
 interrupted_case "KILL at 1 s" kill_1s
 interrupted_case "KILL at 5 s" kill_5s
 interrupted_case "KILL right after the bootstrap log line" kill_after_bootstrap
+interrupted_case "KILL when the loopback health first answers" kill_at_loopback_health
+interrupted_case "KILL during the loopback sign-in" kill_during_signin
+
+# ---------------------------------------------------------------------------
+echo "==== Bootstrap failure that passes the value checks"
+# A database whose user table refuses inserts: upstream's admin bootstrap
+# fails after every check in the start script has passed, and upstream
+# would carry on with no admin. The schema is created first by importing
+# upstream's config module (that runs the migrations without starting the
+# app; the import insists on a WEBUI_SECRET_KEY, so a throwaway one is
+# set for that command only), then a trigger blocks inserts into the user
+# table.
+D_FAULT=$(new_datadir)
+FAULT_ENV=(--user 1001:1001 --network none -e DATA_DIR=/data -e WEBUI_SECRET_KEY=setup-only-throwaway -v "$D_FAULT:/data" --entrypoint python3)
+docker run --rm -i "${FAULT_ENV[@]}" "$IMAGE" - >/dev/null 2>&1 <<'PYFAULT' || echo "  (fault setup exited non-zero)"
+import os, sqlite3
+import open_webui.config  # runs the migrations at import, without starting the app
+db = sqlite3.connect(os.path.join(os.environ["DATA_DIR"], "webui.db"))
+db.execute("CREATE TRIGGER block_users BEFORE INSERT ON user BEGIN SELECT RAISE(ABORT, 'blocked'); END")
+db.commit()
+PYFAULT
+[ "$(as_root "$D_FAULT" 'test -f /data/webui.db && echo yes || echo no')" = yes ] || echo "  (no webui.db after the fault setup)"
+start_app -e DATA_DIR=/data -v "$D_FAULT:/data" "${ADDR[@]}" "${SECRETS_A[@]}"
+ok=true
+EARLY=""
+for i in $(seq 1 1200); do
+  app_running || break
+  # A marker means the fault did not bite and the app is about to serve;
+  # stop watching rather than wait out the whole limit.
+  marker_exists && { echo "  the marker appeared: the bootstrap did not fail"; ok=false; docker kill "$APP" >/dev/null 2>&1; break; }
+  code=$(docker exec "$CURL" curl -s -m 3 -o /dev/null -w '%{http_code}' "$URL/health" 2>/dev/null) || true
+  [ -n "$code" ] || code=000
+  [ "$code" = 000 ] || EARLY=$code
+  sleep 0.5
+done
+code=$(wait_exit)
+[ "$code" = 1 ] || { ok=false; echo "  exit code: $code (want 1)"; }
+[ -z "$EARLY" ] || { ok=false; echo "  public port answered $EARLY"; }
+[ "$(app_logs | tail -n 1)" = "$NO_ADMIN_LINE" ] || { ok=false; echo "  last log line is not the no-admin refusal: $(app_logs | tail -n 1 | cut -c1-120)"; }
+app_logs | grep -q 'Error creating admin account' || { ok=false; echo "  upstream did not report the bootstrap failure (is the fault in place?)"; }
+[ "$(as_root "$D_FAULT" 'test -e /data/.dockhold/template && echo yes || echo no')" = no ] || { ok=false; echo "  a marker was written"; }
+if app_logs | grep -qF "$PASS_1"; then ok=false; echo "  password echoed"; fi
+report "bootstrap fails after the checks (user table refuses inserts): no-admin line last, exit 1, no marker, public port never answered" $ok
+docker run --rm -i "${FAULT_ENV[@]}" "$IMAGE" - >/dev/null 2>&1 <<'PYFAULT' || echo "  (fault removal exited non-zero)"
+import os, sqlite3
+db = sqlite3.connect(os.path.join(os.environ["DATA_DIR"], "webui.db"))
+db.execute("DROP TRIGGER block_users")
+db.commit()
+PYFAULT
+start_app -e DATA_DIR=/data -v "$D_FAULT:/data" "${ADDR[@]}" "${SECRETS_A[@]}"
+ok=true
+wait_health_watching_port || { ok=false; echo "  not healthy after removing the fault"; }
+[ -z "$EARLY_ANSWER" ] || { ok=false; echo "  public port answered $EARLY_ANSWER before the marker"; }
+TOK_F=$(login "$EMAIL_A_LC" "$PASS_1")
+[ -n "$TOK_F" ] || { ok=false; echo "  admin does not log in"; }
+one_admin "$TOK_F" || { ok=false; echo "  users: $(users_json "$TOK_F")"; }
+[[ "$(signup_code "stranger-$(rand_hex 3)@example.com")" =~ ^4 ]] || { ok=false; echo "  signup not refused"; }
+report "fault removed: next start creates the admin, logs in, one admin, signup refused" $ok
+stop_app
+
+# A database that cannot be opened at all (webui.db is a directory): the
+# loopback server dies before it is healthy.
+D_DIR=$(new_datadir)
+as_root "$D_DIR" 'mkdir /data/webui.db && chown 1001:1001 /data/webui.db'
+start_app -e DATA_DIR=/data -v "$D_DIR:/data" "${ADDR[@]}" "${SECRETS_A[@]}"
+ok=true
+code=$(wait_exit)
+[ "$code" = 1 ] || { ok=false; echo "  exit code: $code (want 1)"; }
+[ "$(app_logs | tail -n 1)" = "$STOPPED_LINE" ] || { ok=false; echo "  last log line: $(app_logs | tail -n 1 | cut -c1-120)"; }
+[ "$(as_root "$D_DIR" 'test -e /data/.dockhold/template && echo yes || echo no')" = no ] || { ok=false; echo "  a marker was written"; }
+report "database cannot be opened: loopback server dies, one line saying so, exit 1, no marker" $ok
 
 # ---------------------------------------------------------------------------
 echo "==== Upstream alone: what a failed admin bootstrap leaves behind (measurement, not a case)"
@@ -553,7 +710,7 @@ if wait_health; then
   http_upload "/api/v1/files/?process=true" "$TOK_1G" /tmp/probe.pdf
   UP1G=$HTTP_CODE
   sleep 5
-  info "at --memory 1g: cold start to /health ${WAITED}s; signin $([ -n "$TOK_1G" ] && echo ok || echo failed); PDF upload $UP1G; memory.peak $(mem_peak_mib) MiB; OOM-killed: $(app_oom); still running: $(app_running && echo yes || echo no)"
+  info "at --memory 1g: first start (verify pass + public start) to /health ${WAITED}s; signin $([ -n "$TOK_1G" ] && echo ok || echo failed); PDF upload $UP1G; memory.peak $(mem_peak_mib) MiB; OOM-killed: $(app_oom); still running: $(app_running && echo yes || echo no)"
 else
   info "at --memory 1g: did not become healthy within the limit; OOM-killed: $(app_oom); exit code: $(docker inspect -f '{{.State.ExitCode}}' "$APP" 2>/dev/null)"
 fi

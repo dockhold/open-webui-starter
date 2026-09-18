@@ -20,11 +20,13 @@ COPY entrypoint.sh /app/entrypoint.sh
 #
 # Upstream refreshes its favicon, splash and loader files in this folder on
 # every start (it deletes the old copies and copies the bundled ones back).
-# With the folder root-owned that fails, harmlessly, but with twenty
-# "Permission denied" error lines at the top of every start. Handing the
-# folder itself (not its contents: fonts alone are 63 MB) to user 1001 lets
-# the refresh succeed and keeps the log clean. The layer holds one directory
-# entry.
+# With the folder root-owned that fails, harmlessly (the bundled copies are
+# already there and are still served), but with twenty "Permission denied"
+# error lines at the top of every start. Those lines would be the first
+# thing anyone reads in this app's log when looking for a real problem.
+# Handing the folder itself (not its contents: fonts alone are 63 MB) to
+# user 1001 lets the refresh succeed and keeps the log clean. The layer
+# holds one directory entry; measured at 9 KB together with the script.
 RUN chmod 0755 /app/entrypoint.sh \
  && chown 1001:1001 /app/backend/open_webui/static
 USER 1001:1001

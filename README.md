@@ -37,7 +37,8 @@ point for your own copy.
    the OpenAI API works the same way.
 
 4. Click **Deploy** and wait until the app shows as running. The first
-   start takes a minute or two.
+   start takes a minute or two: the app is started once on an internal
+   address to prove the admin account, then for real.
 5. Open your app's URL, sign in with that email and password, pick a model
    at the top of the chat, and send a message.
 
@@ -50,19 +51,19 @@ Fix it and click **Restart**.
 
 **Run Open WebUI.** Deploy this repository as it is. You get a hosted Open
 WebUI with an admin panel, and you manage users, models and connections in
-that panel. **Redeploy** rebuilds from this repository's `main`, so you pick
-up starter updates when you choose to. `main` only moves for documented
-upgrades; see [CHANGELOG.md](CHANGELOG.md) and "Backups, upgrading,
-restoring" below.
+that panel. The app stays on the version it was built with; **Restart**
+starts the same build again. To move to a newer Open WebUI, switch to the
+Develop path below. See [CHANGELOG.md](CHANGELOG.md) and "Backups,
+upgrading, restoring".
 
 **Develop your copy.** Click **Use this template** on GitHub to make your
 own copy, connect that repository in Dockhold, and deploy it. From then on
-every push redeploys the app. The repository's own checks
+every push builds and starts the new version. The repository's own checks
 (`.github/workflows/check.yml`) run on every push to your copy, and the
 weekly upstream check opens an issue when a new Open WebUI release is out.
 
-Only the second path gives you push-to-deploy. The first path never reads
-your GitHub account.
+Only the second path gives you push-to-deploy and upgrades. The first path
+never reads your GitHub account.
 
 ## What it runs
 
@@ -100,9 +101,14 @@ a secret is missing, when the admin email has no `@`, or when the password
 is under 8 or over 72 characters, and it says so on the app page. Open
 WebUI itself would log the failure and start without an admin, and the
 first person to reach the URL could then register as the admin instead of
-you. The start script checks the values first so that cannot happen.
-Upstream sets no minimum password length; the 8-character floor is this
-template's. 72 is upstream's limit.
+you. The start script checks the values first, and on the first start it
+only opens the port once the admin account exists and can sign in: it
+starts Open WebUI on an internal address, signs in with your credentials,
+and starts it for real only after that succeeds (which is why the first
+start takes about twice as long as later ones). If the sign-in fails, the
+app page says so and nothing has listened. Upstream sets no minimum
+password length; the 8-character floor is this template's. 72 is
+upstream's limit.
 
 ## Sessions
 
@@ -110,7 +116,7 @@ A login lasts seven days. Changing a password does not sign out sessions
 that already exist: Open WebUI would need a separate session store for
 that, which this template does not run. If a device with an open session is
 lost, change the password (Settings > Account); the old session ends within
-seven days. A **Restart** or **Redeploy** does not sign anyone out.
+seven days. A **Restart** does not sign anyone out.
 
 ## Session key
 
@@ -140,13 +146,15 @@ index and the key file live only on App storage, so the storage contents
 are the complete set. App storage is not a backup of itself: take one
 before you upgrade and on a schedule.
 
-**Upgrading.** Take a backup first. On the Run path, click **Redeploy**
-after this repository's `main` has moved; the [CHANGELOG](CHANGELOG.md)
-entry says whether the upgrade changes your data. On the Develop path,
-change the tag and the digest on the `FROM` line of the `Dockerfile`
-together, set the same version in `entrypoint.sh`, and push. Read the
-Open WebUI release notes: it moves quickly and releases sometimes migrate
-the database on start.
+**Upgrading.** Take a backup first. Upgrades happen on the Develop path:
+in your copy, change the tag and the digest on the `FROM` line of the
+`Dockerfile` together and set the same version in `entrypoint.sh`, or
+merge this repository's `main` after it has moved, then push. The
+[CHANGELOG](CHANGELOG.md) entry says whether the upgrade changes your
+data. An app deployed on the Run path stays on the version it was built
+with; to upgrade it, switch it to a copy of your own. Read the Open WebUI
+release notes: it moves quickly and releases sometimes migrate the
+database on start.
 
 If the app comes back on the previous version after an upgrade (Dockhold
 rolls a deploy back when the new version does not become healthy), do not
@@ -157,9 +165,9 @@ not safe. Restore the backup, then retry the upgrade.
 storage contents back (including `.dockhold/webui-secret-key`), and bind
 the same three secrets. There is no import button for the database export;
 it goes back as the `webui.db` file on App storage. On the Develop path
-you pin that version in the `Dockerfile`. The Run path always builds the
-current `main`, so to go back to an older version, switch to the Develop
-path and pin it there.
+you pin that version in the `Dockerfile`. A new Run-path app builds the
+current `main`, so to go back to an older version, use the Develop path
+and pin it there.
 
 ## Limitations
 
