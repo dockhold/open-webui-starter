@@ -10,8 +10,9 @@
 # and then hands over to upstream's start.sh. It reads PORT, DATA_DIR,
 # DATABASE_URL, DOCKHOLD_APP_URL, the three secrets, and the optional
 # overrides WEBUI_SECRET_KEY, WEBUI_URL, ENABLE_OLLAMA_API,
-# OPENAI_API_BASE_URL, JWT_EXPIRES_IN and ENABLE_SIGNUP. It never prints a
-# secret value.
+# OPENAI_API_BASE_URL, JWT_EXPIRES_IN, ENABLE_SIGNUP, HF_HUB_OFFLINE,
+# RAG_EMBEDDING_MODEL_AUTO_UPDATE and RAG_RERANKING_MODEL_AUTO_UPDATE. It
+# never prints a secret value.
 #
 # Every check below fails with one line and exit code 1. Dockhold shows that
 # line on the app page, so the line is the whole error message.
@@ -185,6 +186,19 @@ export ENABLE_OLLAMA_API="${ENABLE_OLLAMA_API:-false}"
 export OPENAI_API_BASE_URL="${OPENAI_API_BASE_URL:-https://api.openai.com/v1}"
 export JWT_EXPIRES_IN="${JWT_EXPIRES_IN:-7d}"
 export ENABLE_SIGNUP="${ENABLE_SIGNUP:-false}"
+
+# The models the app needs (the embedding model for document search, the
+# tokenizer, the speech model) are bundled in the image, and the folder
+# they live in is read-only for the app. So the model hub client runs
+# offline and the per-start "is there a newer revision" check is off.
+# Without these, the first document upload asks Hugging Face for a newer
+# revision of the embedding model, cannot write the answer into the
+# read-only cache, and prints an error trace before loading the bundled
+# model anyway. These three are read from the environment on every start,
+# not stored in the database, so they can be changed later.
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+export RAG_EMBEDDING_MODEL_AUTO_UPDATE="${RAG_EMBEDDING_MODEL_AUTO_UPDATE:-false}"
+export RAG_RERANKING_MODEL_AUTO_UPDATE="${RAG_RERANKING_MODEL_AUTO_UPDATE:-false}"
 
 cd /app/backend
 

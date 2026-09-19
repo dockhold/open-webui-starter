@@ -445,6 +445,24 @@ printf '%s' "$HTTP_BODY" | jq -r '.data.content // ""' | grep -qF -- "zebra quan
 app_logs | grep -qi 'embeddings generated' || { ok=false; echo "  no embedding step in the log"; }
 if app_logs | grep -qi 'huggingface.co\|Downloading'; then ok=false; echo "  a download was attempted"; fi
 report "first start: one-page PDF upload offline is extracted and embedded with the bundled model, no download attempted" $ok
+# The hub client must be offline and the auto-update checks off in the
+# running server's environment, and the ingestion must leave no error
+# behind. With network, the first upload used to ask Hugging Face for a
+# newer revision, fail to write into the read-only model cache, and log an
+# error trace; offline the same code path fails fast and quietly, so the
+# environment is asserted directly and the log is pinned clean.
+ok=true
+ENVIRON=$(docker exec "$APP" sh -c 'tr "\0" "\n" < /proc/1/environ' 2>/dev/null || true)
+printf '%s\n' "$ENVIRON" | grep -qx 'HF_HUB_OFFLINE=1' || { ok=false; echo "  HF_HUB_OFFLINE=1 not in the server's environment"; }
+printf '%s\n' "$ENVIRON" | grep -qx 'RAG_EMBEDDING_MODEL_AUTO_UPDATE=false' || { ok=false; echo "  RAG_EMBEDDING_MODEL_AUTO_UPDATE=false not in the server's environment"; }
+printf '%s\n' "$ENVIRON" | grep -qx 'RAG_RERANKING_MODEL_AUTO_UPDATE=false' || { ok=false; echo "  RAG_RERANKING_MODEL_AUTO_UPDATE=false not in the server's environment"; }
+# The one ERROR this suite provokes on purpose is the provider's model
+# list failing without network (the outbound-calls case above); it is
+# left out of the count so that anything else at ERROR level fails here.
+ERR_LINES=$(app_logs | grep '| ERROR' | grep -vc 'Connection error: Cannot connect to host' || true)
+[ "$ERR_LINES" = 0 ] || { ok=false; echo "  $ERR_LINES ERROR line(s) in the log after ingestion"; app_logs | grep '| ERROR' | grep -v 'Connection error: Cannot connect to host' | head -n 3 | cut -c1-160; }
+[ "$(app_logs | grep -c 'Permission denied' || true)" = 0 ] || { ok=false; echo "  Permission denied in the log after ingestion"; }
+report "first start: hub client offline and auto-update off in the server's environment, no ERROR or Permission denied line after ingestion" $ok
 info "memory.peak after cold start, signin and one PDF upload at --memory $MEM: $(mem_peak_mib) MiB"
 sleep 10
 info "memory.current after 10 s idle: $(mem_now_mib) MiB"

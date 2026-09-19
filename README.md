@@ -72,10 +72,14 @@ documents you upload, are sent to that provider; nothing about that is
 different from using the provider directly. Document search runs inside the
 app: a small embedding model (bundled with the image) indexes uploaded
 files so the chat can quote from them, and that model is why the app needs
-memory. There is no Ollama and no local chat model in this template. Beyond the
-provider, the app's only routine outbound call is a release check against
-GitHub, which fails quietly when unreachable; features you turn on later
-(web search, sharing to the Open WebUI community site) make their own.
+memory. The bundled model is the one used; other Hugging Face models are
+not fetched in this template, because the folder they would go into is
+read-only. To use a different embedding model, pick an OpenAI-compatible
+embedding provider in Admin > Settings > Documents. There is no Ollama and
+no local chat model in this template. Beyond the provider, the app's only
+routine outbound call is a release check against GitHub, which fails
+quietly when unreachable; features you turn on later (web search, sharing
+to the Open WebUI community site) make their own.
 
 ## Configuration ownership
 
@@ -95,6 +99,17 @@ on an existing installation.
 | Session key | the file on App storage | the file (see "Session key") |
 
 Dockhold sets `PORT` and `DATA_DIR` itself. Do not add them.
+
+Three more variables are read on every start and are not stored in the
+database. The start script sets them; add your own value only if you know
+why:
+
+* `HF_HUB_OFFLINE` (default `1`): the model hub client never contacts
+  Hugging Face. The models this template uses are in the image.
+* `RAG_EMBEDDING_MODEL_AUTO_UPDATE` (default `false`): no check for a newer
+  revision of the embedding model on start or first use.
+* `RAG_RERANKING_MODEL_AUTO_UPDATE` (default `false`): the same for a
+  reranking model, should you configure one.
 
 **Bootstrap is strict on purpose.** The start script refuses to start when
 a secret is missing, when the admin email has no `@`, or when the password
