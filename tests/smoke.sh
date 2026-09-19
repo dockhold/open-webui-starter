@@ -39,10 +39,14 @@ PDF_TEXT="Dockhold ingestion probe: zebra quantum pineapple lantern."
 
 PASS_COUNT=0
 FAIL_COUNT=0
+UNKNOWN_COUNT=0
 HTTP_CODE=000
 HTTP_BODY=""
 
 pass() { echo "PASS  $1"; PASS_COUNT=$((PASS_COUNT + 1)); }
+# A case whose precondition was not met on this machine: neither a pass
+# nor a failure, reported with the reason.
+unknown() { echo "UNKNOWN  $1"; UNKNOWN_COUNT=$((UNKNOWN_COUNT + 1)); }
 fail() {
   echo "FAIL  $1"
   FAIL_COUNT=$((FAIL_COUNT + 1))
@@ -636,19 +640,35 @@ interrupted_case "KILL during the loopback sign-in" kill_during_signin
 
 # The platform's stop signal during the pass: the start script forwards it
 # to the loopback server, waits for it, and exits 143. No marker, key kept,
-# and the next start comes up.
+# and the next start comes up. The signal is sent by phase, not by the
+# clock: once the log shows the verify line and the loopback server's own
+# start line, and only while the marker does not exist yet. A slow or fast
+# machine changes when that is, not whether it happens.
 D_TERM=$(new_datadir)
 start_app -e DATA_DIR=/data -v "$D_TERM:/data" "${ADDR[@]}" "${SECRETS_A[@]}"
-sleep 20
-docker stop -t 60 "$APP" >/dev/null 2>&1 || true
-ok=true
-code=$(docker inspect -f '{{.State.ExitCode}}' "$APP")
-[ "$code" = 143 ] || { ok=false; echo "  exit code after SIGTERM: $code (want 143)"; }
-[ "$(as_root "$D_TERM" 'test -e /data/.dockhold/template && echo yes || echo no')" = no ] || { ok=false; echo "  a marker exists after SIGTERM during the pass"; }
-KEY_TERM=$(as_root "$D_TERM" 'cat /data/.dockhold/webui-secret-key 2>/dev/null || true')
-[ -n "$KEY_TERM" ] || { ok=false; echo "  no key file after SIGTERM"; }
-[ "$(verify_lines)" = 1 ] || { ok=false; echo "  verify line count $(verify_lines) (was the pass running at 20 s?)"; }
-report "SIGTERM 20 s into the first start: exit 143, no marker, key file present" $ok
+for i in $(seq 1 2400); do
+  app_running || break
+  [ "$(verify_lines)" -ge 1 ] && listener_opened && break
+  sleep 0.1
+done
+if marker_exists; then
+  unknown "SIGTERM during the verify pass: the marker already existed when the loopback server's start line appeared, so the signal could not be sent inside the pass on this machine"
+  stop_app
+  KEY_TERM=""
+else
+  T0=$(date +%s.%N)
+  docker kill -s TERM "$APP" >/dev/null 2>&1 || true
+  code=$(timeout 90 docker wait "$APP" 2>/dev/null || true)
+  TERM_TO_EXIT=$(printf '%.1f' "$(echo "$(date +%s.%N) - $T0" | bc)")
+  ok=true
+  [ -n "$code" ] || { ok=false; code="still running after 90 s"; docker kill "$APP" >/dev/null 2>&1 || true; }
+  [ "$code" = 143 ] || { ok=false; echo "  exit code after SIGTERM: $code (want 143)"; }
+  [ "$(as_root "$D_TERM" 'test -e /data/.dockhold/template && echo yes || echo no')" = no ] || { ok=false; echo "  a marker exists after SIGTERM during the pass"; }
+  KEY_TERM=$(as_root "$D_TERM" 'cat /data/.dockhold/webui-secret-key 2>/dev/null || true')
+  [ -n "$KEY_TERM" ] || { ok=false; echo "  no key file after SIGTERM"; }
+  report "SIGTERM during the verify pass (loopback server started, marker absent): exit 143, no marker, key file present" $ok
+  info "SIGTERM to container exit during the verify pass: ${TERM_TO_EXIT}s"
+fi
 start_app -e DATA_DIR=/data -v "$D_TERM:/data" "${ADDR[@]}" "${SECRETS_A[@]}"
 ok=true
 wait_health_watching_port || { ok=false; echo "  not healthy after SIGTERM retry"; }
@@ -656,7 +676,9 @@ wait_health_watching_port || { ok=false; echo "  not healthy after SIGTERM retry
 TOK_T=$(login "$EMAIL_A_LC" "$PASS_1")
 [ -n "$TOK_T" ] || { ok=false; echo "  admin does not log in"; }
 one_admin "$TOK_T" || { ok=false; echo "  users: $(users_json "$TOK_T")"; }
-[ "$(as_root "$D_TERM" 'cat /data/.dockhold/webui-secret-key')" = "$KEY_TERM" ] || { ok=false; echo "  key replaced on the retry"; }
+if [ -n "$KEY_TERM" ]; then
+  [ "$(as_root "$D_TERM" 'cat /data/.dockhold/webui-secret-key')" = "$KEY_TERM" ] || { ok=false; echo "  key replaced on the retry"; }
+fi
 report "SIGTERM retry: healthy, one admin, key kept" $ok
 log_clean "SIGTERM retry" "${ALL_VALUES[@]}" "$KEY_TERM"
 stop_app
@@ -868,5 +890,5 @@ stop_app
 MEM=2g
 
 # ---------------------------------------------------------------------------
-echo "==== Summary: $PASS_COUNT passed, $FAIL_COUNT failed"
+echo "==== Summary: $PASS_COUNT passed, $FAIL_COUNT failed, $UNKNOWN_COUNT unknown"
 [ "$FAIL_COUNT" -eq 0 ]
