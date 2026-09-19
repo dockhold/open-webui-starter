@@ -32,9 +32,11 @@ point for your own copy.
    | `open-webui-openai-key` | `OPENAI_API_KEY` | An API key from OpenAI, or from another OpenAI-compatible provider |
 
    To use a provider other than OpenAI, also add a plain variable
-   `OPENAI_API_BASE_URL` with the provider's address, for example
-   `https://openrouter.ai/api/v1` for OpenRouter. Any provider that speaks
-   the OpenAI API works the same way.
+   `OPENAI_API_BASE_URL` with the provider's address:
+   `https://api.anthropic.com/v1` for Anthropic (Claude models; verified
+   with a model list and a streamed reply) or `https://openrouter.ai/api/v1`
+   for OpenRouter. Any provider that speaks the OpenAI API works the same
+   way.
 
 4. Click **Deploy** and wait until the app shows as running. The first
    start takes a minute or two: the app is started once on an internal
