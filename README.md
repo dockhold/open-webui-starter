@@ -46,7 +46,8 @@ point for your own copy.
 
 If the app refuses to start, its page shows one line saying what is missing.
 App storage is on the app's **Size** tab; secrets are attached on its
-**Variables** tab and their values are edited under **Settings > Secrets**.
+**Variables** tab and their values are edited under **Secrets** in the
+dashboard sidebar.
 Fix it and click **Restart**.
 
 ## Two ways to use it
