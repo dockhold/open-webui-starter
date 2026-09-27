@@ -8,11 +8,11 @@ Dockhold's port, App storage, your admin account and your model provider.
 Nothing else is changed. Deploy it as it is, or use it as the starting
 point for your own copy.
 
-[![Deploy to Dockhold](https://img.shields.io/badge/Deploy%20to-Dockhold-2563eb?style=for-the-badge)](https://app.dockhold.eu/new?repo=https://github.com/dockhold/open-webui-starter&name=open-webui)
+[![Deploy on Dockhold](https://dockhold.eu/button.svg)](https://app.dockhold.eu/new?repo=https://github.com/dockhold/open-webui-starter&name=open-webui-starter&ref=button)
 
 ## Deploy
 
-1. Open the [Deploy link](https://app.dockhold.eu/new?repo=https://github.com/dockhold/open-webui-starter&name=open-webui)
+1. Open the [Deploy link](https://app.dockhold.eu/new?repo=https://github.com/dockhold/open-webui-starter&name=open-webui-starter&ref=button)
    and sign in if asked.
 2. Under **App size**, start at **2 GB**. This app needs a paid plan: its
    image is far larger than the free plan allows, and it runs a document
