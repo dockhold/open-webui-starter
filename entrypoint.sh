@@ -79,7 +79,7 @@ fi
 case "$WEBUI_ADMIN_EMAIL" in
   *@*) ;;
   *)
-    echo "WEBUI_ADMIN_EMAIL is not an email address (it has no @). Fix the secret under Settings > Secrets and restart." >&2
+    echo "WEBUI_ADMIN_EMAIL is not an email address (it has no @). Fix the secret under Secrets in the dashboard sidebar and restart." >&2
     exit 1
     ;;
 esac
@@ -89,7 +89,7 @@ esac
 # the front door to every chat on the app.
 pw_bytes=$(printf '%s' "$WEBUI_ADMIN_PASSWORD" | wc -c | tr -d ' ')
 if [ "$pw_bytes" -lt 8 ] || [ "$pw_bytes" -gt 72 ]; then
-  echo "WEBUI_ADMIN_PASSWORD must be 8 to 72 characters long. Fix the secret under Settings > Secrets and restart." >&2
+  echo "WEBUI_ADMIN_PASSWORD must be 8 to 72 characters long. Fix the secret under Secrets in the dashboard sidebar and restart." >&2
   exit 1
 fi
 

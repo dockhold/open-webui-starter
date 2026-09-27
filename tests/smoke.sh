@@ -2,9 +2,10 @@
 # Smoke test for the open-webui-starter image, run the way Dockhold runs it:
 # user 1001, every capability dropped, no privilege escalation, 2 GB of
 # memory and no swap, App storage mounted at /data owned root:1001 with mode
-# 2770, a fixed PORT, generated secrets, and no outbound network (so the
-# provider and the release check are unreachable, which is itself one of the
-# things checked). Every assertion goes through Open WebUI's own API from a
+# 2770, a fixed PORT and generated secrets. One restriction goes further than
+# Dockhold does: there is no outbound network, so the provider and the
+# release check are unreachable, which is itself one of the things checked.
+# Every assertion goes through Open WebUI's own API from a
 # curl helper on the same isolated network. Nothing upstream is mocked.
 #
 # Usage: tests/smoke.sh <image>
@@ -329,7 +330,7 @@ secret_refusal() { # NAME MUST_CONTAIN MUST_NOT_CONTAIN [docker run args...]
   [ "$code" = 1 ] || { ok=false; echo "  exit code: $code (want 1)"; }
   [ "$(printf '%s\n' "$log" | wc -l | tr -d ' ')" = 1 ] || { ok=false; echo "  more than one log line"; }
   printf '%s' "$log" | grep -qF -- "$must" || { ok=false; echo "  log does not say: $must"; }
-  printf '%s' "$log" | grep -q 'Variables tab\|Settings > Secrets' || { ok=false; echo "  log does not say where to fix it"; }
+  printf '%s' "$log" | grep -q 'Variables tab\|Secrets in the dashboard sidebar' || { ok=false; echo "  log does not say where to fix it"; }
   if [ -n "$mustnot" ] && printf '%s' "$log" | grep -qF -- "$mustnot"; then ok=false; echo "  log contains a secret value"; fi
   if listener_opened; then ok=false; echo "  listener opened"; fi
   [ "$(as_root "$D_SEC" 'test -e /data/.dockhold && echo yes || echo no')" = no ] || { ok=false; echo "  a refused start wrote the template folder"; }
